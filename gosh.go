@@ -3,33 +3,20 @@ package gosh
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"strings"
 )
 
-var Env = map[string]string{}
-
-func init() {
-	for _, item := range os.Environ() {
-		lst := strings.Split(item, "=")
-		Env[lst[0]] = lst[1]
-	}
-}
-
-func ck(err error) {
+func Pipe(s string) (string, string, error) {
+	commandList, err := scan(s)
 	if err != nil {
-		log.Fatal(err)
+		return "", "", err
 	}
-}
-
-func Pipe(s string) string {
-	commandList := scan(s)
 
 	output := new(bytes.Buffer)
+	errOutput := new(bytes.Buffer)
 	length := len(commandList)
 	switch length {
 	case 0:
@@ -48,9 +35,16 @@ func Pipe(s string) string {
 			cmd.Stdout = commandList[0].Out
 		}
 
-		cmd.Stderr = commandList[0].Err
+		if commandList[0].Err == nil {
+			cmd.Stderr = errOutput
+		} else {
+			cmd.Stderr = commandList[0].Err
+		}
+
 		err := cmd.Run()
-		ck(err)
+		if err != nil {
+			return "", dropNewLine(errOutput.String()), err
+		}
 	default:
 		cmdList := make([]*exec.Cmd, length)
 		bufList := make([]*bytes.Buffer, length-1)
@@ -60,6 +54,12 @@ func Pipe(s string) string {
 
 		for i, order := range commandList {
 			cmd := exec.Command(order.Cmd[0], order.Cmd[1:]...)
+			if order.Err == nil {
+				cmd.Stderr = errOutput
+			} else {
+				cmd.Stderr = order.Err
+			}
+
 			switch i {
 			case 0: // first command
 				if order.In == nil {
@@ -68,7 +68,6 @@ func Pipe(s string) string {
 					cmd.Stdin = order.In
 				}
 				cmd.Stdout = bufList[i]
-				cmd.Stderr = order.Err
 			case length - 1: // last command
 				cmd.Stdin = bufList[i-1]
 				if order.Out == nil {
@@ -76,21 +75,31 @@ func Pipe(s string) string {
 				} else {
 					cmd.Stdout = order.Out
 				}
-				cmd.Stderr = order.Err
 			default:
 				cmd.Stdin = bufList[i-1]
 				cmd.Stdout = bufList[i]
-				cmd.Stderr = order.Err
 			}
 			cmdList[i] = cmd
 		}
 
 		for _, c := range cmdList {
 			err := c.Run()
-			ck(err)
+			if err != nil {
+				return "", dropNewLine(errOutput.String()), err
+			}
 		}
 	}
-	return output.String()
+
+	return dropNewLine(output.String()), dropNewLine(errOutput.String()), nil
+}
+
+func dropNewLine(s string) string {
+	// if the last character is new-line, drop it
+	if len(s) > 0 && s[len(s)-1] == '\n' {
+		return s[:len(s)-1]
+	} else {
+		return s
+	}
 }
 
 type SingleCmd struct {
@@ -100,7 +109,7 @@ type SingleCmd struct {
 	Cmd []string
 }
 
-func scan(s string) []SingleCmd {
+func scan(s string) ([]SingleCmd, error) {
 	var (
 		result    = []SingleCmd{}
 		singleCmd = SingleCmd{}
@@ -119,25 +128,33 @@ func scan(s string) []SingleCmd {
 			if scanner.Scan() {
 				fileName := expandPath(scanner.Text())
 				singleCmd.In, err = os.OpenFile(fileName, os.O_RDONLY, 0644)
-				ck(err)
+				if err != nil {
+					return nil, err
+				}
 			}
 		case ">":
 			if scanner.Scan() {
 				fileName := expandPath(scanner.Text())
 				singleCmd.Out, err = os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-				ck(err)
+				if err != nil {
+					return nil, err
+				}
 			}
 		case "^":
 			if scanner.Scan() {
 				fileName := expandPath(scanner.Text())
 				singleCmd.Err, err = os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-				ck(err)
+				if err != nil {
+					return nil, err
+				}
 			}
 		case ">>":
 			if scanner.Scan() {
 				fileName := expandPath(scanner.Text())
 				singleCmd.Out, err = os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-				ck(err)
+				if err != nil {
+					return nil, err
+				}
 			}
 		default:
 			singleCmd.Cmd = append(singleCmd.Cmd, expandPath(token))
@@ -147,8 +164,10 @@ func scan(s string) []SingleCmd {
 		result = append(result, singleCmd)
 	}
 	err = scanner.Err()
-	ck(err)
-	return result
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func expandPath(s string) string {
@@ -160,7 +179,7 @@ func expandPath(s string) string {
 		panic("empty string in expandPath")
 	case 1:
 		if s == "~" {
-			result = Env["HOME"]
+			result = os.Getenv("HOME")
 		} else {
 			result = s
 		}
@@ -171,7 +190,7 @@ func expandPath(s string) string {
 		default:
 			// expand tilda
 			if s[1] == '/' {
-				result = Env["HOME"] + s[1:]
+				result = os.Getenv("HOME") + s[1:]
 			} else {
 				result = s
 			}
@@ -220,17 +239,15 @@ func scanBashWords(data []byte, atEOF bool) (advance int, token []byte, err erro
 				// in non-string context
 				switch b {
 				case '\'':
-					if in["word"] {
-						return 0, nil, errors.New("string literal in word")
-					}
-					wordStart = i
 					in["single-quote"] = true
-				case '"':
-					if in["word"] {
-						return 0, nil, errors.New("string literal in word")
+					if !in["word"] {
+						wordStart = i
 					}
-					wordStart = i
+				case '"':
 					in["double-quote"] = true
+					if !in["word"] {
+						wordStart = i
+					}
 				case ' ':
 					if in["word"] {
 						return i + 1, data[wordStart:i], nil
