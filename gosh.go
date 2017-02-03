@@ -9,7 +9,17 @@ import (
 	"strings"
 )
 
-func Pipe(s string) (string, string, error) {
+func And(lst []string, dir string) (output, errOutput string, err error) {
+	for _, s := range lst {
+		output, errOutput, err = Pipe(s, dir)
+		if err != nil {
+			return
+		}
+	}
+	return
+}
+
+func Pipe(s, dir string) (string, string, error) {
 	commandList, err := scan(s)
 	if err != nil {
 		return "", "", err
@@ -23,6 +33,7 @@ func Pipe(s string) (string, string, error) {
 		panic("there is nothing in pipe")
 	case 1:
 		cmd := exec.Command(commandList[0].Cmd[0], commandList[0].Cmd[1:]...)
+		cmd.Dir = dir
 		if commandList[0].In == nil {
 			cmd.Stdin = os.Stdin
 		} else {
@@ -54,6 +65,7 @@ func Pipe(s string) (string, string, error) {
 
 		for i, order := range commandList {
 			cmd := exec.Command(order.Cmd[0], order.Cmd[1:]...)
+			cmd.Dir = dir
 			if order.Err == nil {
 				cmd.Stderr = errOutput
 			} else {
